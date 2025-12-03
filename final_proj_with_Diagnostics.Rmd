@@ -1,0 +1,225 @@
+---
+title: "Indian Used Car Sales Analysis"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(glmnet)
+library(lmtest)
+library(corrplot)
+```
+
+## Reading and Cleaning the Data set
+
+```{r}
+
+cars_raw<- read.csv("used_cars_data.csv",stringsAsFactors = FALSE)
+dim(cars_raw)
+names(cars_raw)
+str(cars_raw)
+summary(cars_raw)
+```
+
+```{R}
+#drops ID since its useless
+#will also not consider New price since over 70% of NewPrice col is empty
+cars<- cars_raw %>% select(-S.No.,-New_Price)
+#converting the currency from INR Lakhs to USD
+cars <- cars %>% mutate(Price = 1120*Price)
+
+#Stripping the unit from these variables' values so they can be quantifiable 
+cars<-cars  %>% mutate(Mileage = as.numeric(str_extract(Mileage, "[0-9.]+")))
+cars<-cars  %>% mutate(Engine = as.numeric(str_extract(Engine, "[0-9.]+")))
+cars<-cars  %>% mutate(Power = as.numeric(str_extract(Power,"[0-9.]+")))
+
+#car_age is more usable than make year of model. 
+current_year <- 2020
+cars <- cars %>% mutate(Age = current_year - Year)
+cars <- cars %>% select(-Year)
+```
+
+
+```{R}
+num_cars <- cars %>% select_if(is.numeric)
+corr_matrix<-cor(num_cars)
+corrplot(corr_matrix, method="color", type="upper",addCoef.col = "black", tl.srt = 45)
+
+```
+
+```{R}
+#make sure there are no more missing values
+colSums(is.na(cars))
+cars <- na.omit(cars)
+```
+
+## Regularization + Transformations
+
+```{R}
+hist(cars$Price, xlab="Price", main="Distribution of Car Prices")
+hist(log(cars$Price), xlab="Price", main="Price Histogram after log")
+
+
+#Since the plot is very rightly skewed, we should apply log to normalize it
+```
+
+```{R}
+#Want to make sure that we do not include the variables name and location to prevent the creation of dummy variables to be created
+cars_no_name_location <- cars %>% select(-Name,-Location)
+ols_model <- lm(log(cars$Price)~., data=cars_no_name_location)
+summary(ols_model)
+
+library(car)
+vif_values <- vif(ols_model)
+vif_values
+sort(vif_values, decreasing = TRUE)
+#Engine displacement and engine horsepower carry almost the same information → strong multicollinearity.
+```
+
+# Checking for Assumptions
+
+```{R}
+
+plot(ols_model,which = 1)
+plot(ols_model,which = 2)
+plot(ols_model,which = 3)
+
+
+bptest(ols_model)
+
+
+
+```
+
+# Residual vs fitted plot does not really show any strong curvature, this plot indicates that the relationship between log(Prices) and the predictors is reasonably Linear.
+
+# Q-Q Plot indicates the central portion is normal. The tails however deviate noticeably due to several large residuals at the end. Due to the large sample size, I do not think that this violation is severe enough to invalidate the model.
+
+# According to the B-P test, there is some heteroscedasticity present. Given that our sample size is large (over 5,000 observations), the BP test can be extremely sensitive. This makes me believe it should not be so severe to invalidate it for that reason. If we also look at the Residual vs fitted plot, we can see that there is only mild heteroscedasticity if not minor.
+
+```{R}
+ols_res <- rstandard(ols_model)
+outliers <- which(abs(ols_res) > 3)
+
+cars_clean <- cars_no_name_location[-outliers, ]
+ols_clean <- lm(log(Price) ~ ., data = cars_clean)
+
+plot(ols_clean, which = 1)
+plot(ols_clean, which = 2)
+bptest(ols_clean)
+```
+
+# Trying to get rid of the outliers to deal with the homoskedasticity seems to make it worst so we will just keep it the way it is
+
+## Perform OLS and Lasso
+
+```{R}
+x <- model.matrix(log(Price)~., data=cars_no_name_location)[,-1]
+y <- log(cars_no_name_location$Price)
+#x <- model.matrix(Price~., data=cars_clean)[,-1]
+#y <- cars_clean$Price
+
+set.seed(1)
+#Lasso:
+cv_lasso <-cv.glmnet(x,y, alpha=1)
+plot(cv_lasso)
+title("Lasso Cross Validation", line = 2.5)
+#Best Lambda
+lasso_lambda <- cv_lasso$lambda.min
+#coefficients at Lambda.min
+lasso_coefs <- coef(cv_lasso, s= lasso_lambda)
+as.matrix(lasso_coefs)
+
+
+
+#Ridge:
+cv_ridge <- cv.glmnet(x,y, alpha=0)
+plot(cv_ridge)
+title("Ridge Cross Validation", line = 2.5)
+#Best Lambda
+ridge_lambda <- cv_ridge$lambda.min
+#coefficients at Lambda.min
+ridge_coefs <- coef(cv_ridge, s= ridge_lambda)
+
+```
+
+```{R}
+coef_df<- data.frame(variable = rownames(lasso_coefs), coefficient=as.numeric(lasso_coefs))
+coef_df %>% filter (coefficient!=0) %>% arrange(desc(abs(coefficient)))
+```
+
+```{R}
+set.seed(1)
+#splitting data 30-70
+train_idx <- sample(1:nrow(cars_no_name_location), 0.7 * nrow(cars_no_name_location))
+train <- cars_no_name_location[train_idx, ]
+test  <- cars_no_name_location[-train_idx, ]
+# OLS model on training data
+ols_train <- lm(log(Price) ~ ., data = train)
+ols_pred <- predict(ols_train, newdata = test)
+
+#Prepare matrices for glmnet
+#glmnet needs X matrix and y vector:
+x_train <- model.matrix(log(Price) ~ ., data = train)[, -1]
+y_train <- log(train$Price)
+
+x_test  <- model.matrix(log(Price) ~ ., data = test)[, -1]
+y_test  <- log(test$Price)
+
+#fit Lasso
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1)
+lasso_lambda <- cv_lasso$lambda.min
+
+lasso_model <- glmnet(x_train, y_train, alpha = 1, lambda = lasso_lambda)
+lasso_pred <- predict(lasso_model, s = lasso_lambda, newx = x_test)
+
+#fit Ridge
+cv_ridge <- cv.glmnet(x_train, y_train, alpha = 0)
+ridge_lambda <- cv_ridge$lambda.min
+
+ridge_model <- glmnet(x_train, y_train, alpha = 0, lambda = ridge_lambda)
+ridge_pred <- predict(ridge_model, s = ridge_lambda, newx = x_test)
+
+library(ggplot2)
+
+rmse_df <- data.frame(
+           Model = c("OLS", "Lasso", "Ridge"),
+           RMSE  = c(ols_rmse, lasso_rmse, ridge_rmse)
+           )
+
+
+ggplot(rmse_df, aes(x = Model, y = RMSE)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = round(RMSE, 4)), vjust = -0.3) +
+  coord_cartesian(ylim = c(0.30, 0.32)) +
+  labs(
+    title = "Test RMSE by Model (Zoomed In)",
+    x = "Model",
+    y = "RMSE (log-price)"
+  ) +
+  theme_minimal()
+
+
+
+
+#Compare RMSE for all 3 Models
+rmse <- function(actual, predicted) {
+        sqrt(mean((actual - predicted)^2))
+        }
+
+ols_rmse   <- rmse(y_test, ols_pred)
+lasso_rmse <- rmse(y_test, lasso_pred)
+ridge_rmse <- rmse(y_test, ridge_pred)
+
+ols_rmse
+lasso_rmse
+ridge_rmse
+```
+## Conclusion:
