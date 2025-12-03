@@ -1,5 +1,5 @@
 ---
-title: "R Notebook"
+title: "Indian Used Car Sales Analysis"
 output:
   html_document:
     df_print: paged
@@ -143,3 +143,4 @@ ridge_coefs <- coef(cv_ridge, s= ridge_lambda)
 coef_df<- data.frame(variable = rownames(lasso_coefs), coefficient=as.numeric(lasso_coefs))
 coef_df %>% filter (coefficient!=0) %>% arrange(desc(abs(coefficient)))
 ```
+
