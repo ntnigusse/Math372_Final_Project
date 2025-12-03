@@ -1,0 +1,1 @@
+This project builds a predictive model for used car prices in india (converted from lakhs to USD). I used multiple linear regression, Lasso, and Ridge regression to determine which car features strongly linked with prices. All analysis was done using R. To check the work, please download the RMD file and the csv file, then  run the code in the RMD file to see my analysis.
