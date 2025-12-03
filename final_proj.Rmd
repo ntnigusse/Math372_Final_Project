@@ -1,0 +1,135 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(glmnet)
+library(lmtest)
+```
+
+## Reading and Cleaning the Data set
+
+```{r}
+
+cars_raw<- read.csv("used_cars_data.csv",stringsAsFactors = FALSE)
+dim(cars_raw)
+names(cars_raw)
+str(cars_raw)
+summary(cars_raw)
+```
+
+```{R}
+#drops ID since its useless
+#will also not consider New price since over 70% of NewPrice col is empty
+cars<- cars_raw %>% select(-S.No.,-New_Price)
+#converting the currency from INR Lakhs to USD
+cars <- cars %>% mutate(Price = 1120*Price)
+
+#Stripping the unit from these variables' values so they can be quantifiable 
+cars<-cars  %>% mutate(Mileage = as.numeric(str_extract(Mileage, "[0-9.]+")))
+cars<-cars  %>% mutate(Engine = as.numeric(str_extract(Engine, "[0-9.]+")))
+cars<-cars  %>% mutate(Power = as.numeric(str_extract(Power,"[0-9.]+")))
+
+
+
+```
+
+```{R}
+#make sure there are no more missing values
+colSums(is.na(cars))
+cars <- na.omit(cars)
+
+```
+
+## Regularization + Transformations
+
+```{R}
+hist(cars$Price, xlab="Price", main="Price Histogram")
+hist(log(cars$Price), xlab="Price", main="Price Histogram after log")
+#Since the plot is very rightly skewed, we should apply log to normalize it
+```
+
+```{R}
+#Want to make sure that we do not include the variables name and location to prevent the creation of dummy variables to be created
+cars_no_name_location <- cars %>% select(-Name,-Location)
+ols_model <- lm(log(cars$Price)~., data=cars_no_name_location)
+summary(ols_model)
+```
+
+# Checking for Assumptions
+
+```{R}
+
+plot(ols_model,which = 1)
+plot(ols_model,which = 2)
+plot(ols_model,which = 3)
+
+
+bptest(ols_model)
+
+
+
+```
+
+# Residual vs fitted plot does not really show any strong curvature, this plot indicates that the relationship between log(Prices) and the predictors is reasonably Linear.
+
+# Q-Q Plot indicates the central portion is normal. The tails however deviate noticeably due to several large residuals at the end. Due to the large sample size,  I do not think that this violation is severe enough to invalidate the model.
+
+# According to the B-P test, there is some heteroscedasticity present. Given that our sample size is large (over 5,000 observations), the BP test can be extremely sensitive. This makes me believe it should not be so severe to invalidate it for that reason. If we also look at the Residual vs fitted plot, we can see that there is only mild heteroscedasticity if not minor.
+
+```{R}
+ols_res <- rstandard(ols_model)
+outliers <- which(abs(ols_res) > 3)
+
+cars_clean <- cars_no_name_location[-outliers, ]
+ols_clean <- lm(log(Price) ~ ., data = cars_clean)
+
+plot(ols_clean, which = 1)
+plot(ols_clean, which = 2)
+bptest(ols_clean)
+```
+
+# Trying to get rid of the outliers to deal with the homoskedasticity seems to make it worst so we will just keep it the way it is
+
+## Perform OLS and Lasso
+
+```{R}
+x <- model.matrix(log(Price)~., data=cars_no_name_location)[,-1]
+y <- log(cars_no_name_location$Price)
+#x <- model.matrix(Price~., data=cars_clean)[,-1]
+#y <- cars_clean$Price
+
+set.seed(1)
+#Lasso:
+cv_lasso <-cv.glmnet(x,y, alpha=1)
+plot(cv_lasso)
+title("Lasso Cross Validation", line = 2.5)
+#Best Lambda
+lasso_lambda <- cv_lasso$lambda.min
+#coefficients at Lambda.min
+lasso_coefs <- coef(cv_lasso, s= lasso_lambda)
+
+
+
+#Ridge:
+cv_ridge <- cv.glmnet(x,y, alpha=0)
+plot(cv_ridge)
+title("Ridge Cross Validation", line = 2.5)
+#Best Lambda
+ridge_lambda <- cv_ridge$lambda.min
+#coefficients at Lambda.min
+ridge_coefs <- coef(cv_ridge, s= ridge_lambda)
+
+```
+
+```{R}
+coef_df<- data.frame(variable = rownames(lasso_coefs), coefficient=as.numeric(lasso_coefs))
+coef_df %>% filter (coefficient!=0) %>% arrange(desc(abs(coefficient)))
+```
